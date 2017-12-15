@@ -3,28 +3,116 @@
 
 Overview
 ---
-This repository contains my implementation of the odel Predictive Control project (Term 2 - Project 5) in Udacity's Self-Driving Car Nanodegree Program.
-The goal of the project is to implement a PID controller to race around the lake track in the driving simulator.
+This repository contains my implementation of the Model Predictive Control project (Term 2 - Project 5) in Udacity's Self-Driving Car Nanodegree Program.
+The goal of the project is to implement a MPC to race around the lake track in the driving simulator.
 
-## Implementation 
+## Implementation (Rubric Points)
 
-One PID controller is used to control the throttle of the vehicle in order to achieve a constant speed of 20 km/s. 
-The parameters of the throttle PID controller are set to: Kp=0.05, Ki = 0.001 and Kd = 0.
 
-Another PID controller is used to control the steering. 
-Manual parameter tuning was used to get a feeling for the impact of the single parameters. 
-Afterwards, a twiddle algorithm was used to automatically fine tune the parameters. 
-The algorithm is implemented similar to the version showin in the class. 
-For every set of parameters, the simulator is first reset and then the code is run for the first 500 timestamps of the simulator.
-Using this procedure, the total error of more than 200 parameter configurations was recorded.
-The parameter-set with the minimum error was: Kp=0.813491, Ki = 0.00215393 and Kd = 3.24184.
-Thus, this combination was used for the submission of the project. 
+### The Model
 
-The implementation of the twiddle algorithm can be found in `src/main_twiddle.cpp`
+The state vector:
+```
+x // x-position
+y  // y-position
+psi // heading angle
+v  // velocity
+cte // cross track error
+epsi // heading eror
+```
+
+The actuators:
+```
+a // acceleeration
+delta // steering angle
+```
+
+Update equations:
+```
+AD<double> f0 = coeffs[0] + coeffs[1] * x0 + coeffs[2] * x0*x0 + coeffs[3]* x0*x0*x0; 
+AD<double> psides0 = CppAD::atan(coeffs[1] + 2 * coeffs[2] * x0  + 3 * coeffs[3] * x0 * x0);
+
+fg[1 + x_start + t] = x1 - (x0 + v0 * CppAD::cos(psi0) * dt);
+fg[1 + y_start + t] = y1 - (y0 + v0 * CppAD::sin(psi0) * dt);
+fg[1 + psi_start + t] = psi1 - (psi0 + v0 * delta0 / Lf * dt);
+fg[1 + v_start + t] = v1 - (v0 + a0 * dt);
+fg[1 + cte_start + t] = cte1 - ((f0 - y0) + (v0 * CppAD::sin(epsi0) * dt));
+fg[1 + epsi_start + t] = epsi1 - ((psi0 - psides0) + v0 * delta0 / Lf * dt);
+```
+
+### Timestep Length and Elapsed Duration
+
+The timestep number was set to `N=10` and the single timestep length to `dt = 0.1` resulting in a total length of 1 second. 
+The reference speed was set to `ref_v = 40`.
+
+
+### Polynomial Fitting and MPC Preprocessing
+First the waypoints are transformed into the vehicle's coordinate system: 
+```
+for (int i = 0;   i < ptsx.size() ;   i++) {
+  waypoints_x_car_space(i) = (ptsx[i] - px) * cos(-psi) - (ptsy[i] - py) * sin(-psi);
+  waypoints_y_car_space(i) = (ptsy[i] - py) * cos(-psi) + (ptsx[i] - px) * sin(-psi);
+}
+```
+
+In car-space, the car's x,y and psi values are zero.
+A 3rd order polynomial is fitted to the waypoints (in car coordinate system).
+Afterwards the CTE and the EPSI are calculated.
+```    
+double car_x_car_space = 0.0;
+double car_y_car_space = 0.0;
+double car_psi_car_space = 0.0;
+
+auto coeffs = polyfit(waypoints_x_car_space, waypoints_y_car_space, 3);
+
+// Calculate cte: f(x) - y
+double cte = polyeval(coeffs, car_x_car_space) - car_y_car_space;
+
+// Calculate epsi = psi - atan(f'(x))
+double epsi = car_psi_car_space - atan(coeffs[1] + 2*coeffs[2]*car_x_car_space + 3*coeffs[3]*car_x_car_space*car_x_car_space);
+```
+
+Finally the current state vector is fed into the MPC solver:
+```   
+state << car_x_car_space, car_y_car_space, car_psi_car_space, v, cte, epsi;
+MPCData solution = mpc.Solve(state, coeffs);
+```
+         
+### Model Predictive Control with Latency
+
+In order to deal with latency, the state after that delay is predicted prior to the transformation of the waypoints into the vehicle's coordinate system. 
+
+```   
+px = px + v* 0.44704 * cos(psi)*latency;  // 0.44704 --> convert from mph to m/s
+py = py + v* 0.44704 * sin(psi)*latency;
+psi = psi - v* 0.44704 *delta/Lf*latency; // steering angle negative
+```
+
+### Cost Function Weights
+
+This snipped shows the manually tuned weights of the cost function in order to achieve the final output.
+```   
+    for (int t = 0; t < N; t++) {
+      fg[0] += 100*CppAD::pow(vars[cte_start + t], 2);
+      fg[0] += 150*CppAD::pow(vars[epsi_start + t], 2);
+      fg[0] += CppAD::pow(vars[v_start + t] - ref_v, 2);
+    }
+
+    for (int t = 0; t < N - 1; t++) {
+      fg[0] += 500*CppAD::pow(vars[delta_start + t], 2);
+      fg[0] += CppAD::pow(vars[a_start + t], 2);
+    }
+
+    for (int t = 0; t < N - 2; t++) {
+      fg[0] += 1500*CppAD::pow(vars[delta_start + t + 1] - vars[delta_start + t], 2);
+      fg[0] += 100*CppAD::pow(vars[a_start + t + 1] - vars[a_start + t], 2);
+    }
+```
+
 
 ## Demo
 
-The chosen parameter configuration resulted in the following output: 
+The implementation resulted in the following output: 
 
 <img src="./media/video.gif" />  
 
